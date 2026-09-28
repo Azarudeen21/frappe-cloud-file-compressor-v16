@@ -1,0 +1,2 @@
+recursive-include file_compressor *.py *.txt
+include README.md
