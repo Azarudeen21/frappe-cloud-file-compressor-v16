@@ -33,7 +33,13 @@ def _compress_above_bytes() -> int:
 
 
 def compress_uploaded_file(doc):
-    """Compress supported uploads before Frappe saves the File document."""
+    """Compress supported uploads before Frappe saves the File document.
+
+    Important for Frappe v16:
+    handler.upload_file() passes the original upload size in frappe.form_dict.
+    File.validate() can later copy that value into File.file_size, so after
+    compression we must update both the document and form_dict metadata.
+    """
     if not _enabled():
         return doc
 
@@ -60,12 +66,26 @@ def compress_uploaded_file(doc):
         else:
             compressed = _compress_pdf(content)
 
-        # Never replace the upload with a larger or empty result.
         if compressed and len(compressed) < original_size:
+            compressed_size = len(compressed)
+
+            # Replace the bytes Frappe will save.
             doc.content = compressed
-            # Keep alternate internal content attribute consistent when present.
-            if hasattr(doc, "_content"):
-                doc._content = compressed
+            doc._content = compressed
+
+            # Keep File metadata correct.
+            doc.file_size = compressed_size
+
+            # Frappe v16 File.validate() reads frappe.form_dict.file_size,
+            # which normally still contains the ORIGINAL browser upload size.
+            # Update it so the stored File record reflects the compressed file.
+            if getattr(frappe, "form_dict", None) is not None:
+                frappe.form_dict.file_size = compressed_size
+
+            # Helpful request-local flags for debugging/support.
+            doc.flags.file_compressor_applied = True
+            doc.flags.file_compressor_original_size = original_size
+            doc.flags.file_compressor_final_size = compressed_size
 
     except Exception:
         frappe.log_error(
@@ -99,7 +119,6 @@ def _compress_image(content: bytes, extension: str) -> bytes:
                 progressive=True,
             )
         else:
-            # Keep alpha/transparency for PNG.
             image.save(
                 output,
                 format="PNG",
@@ -114,10 +133,9 @@ def _compress_image(content: bytes, extension: str) -> bytes:
 def _compress_pdf(content: bytes) -> bytes:
     gs = shutil.which("gs")
     if not gs:
-        # Image compression can still work even if Ghostscript is absent.
         frappe.log_error(
             title="PDF Compression Skipped",
-            message="Ghostscript executable 'gs' was not found.",
+            message="Ghostscript executable 'gs' was not found in the running container.",
         )
         return content
 
@@ -127,6 +145,7 @@ def _compress_pdf(content: bytes) -> bytes:
 
     in_path = None
     out_path = None
+
     try:
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as src:
             src.write(content)
@@ -143,6 +162,7 @@ def _compress_pdf(content: bytes) -> bytes:
             "-dNOPAUSE",
             "-dQUIET",
             "-dBATCH",
+            "-dSAFER",
             "-dDetectDuplicateImages=true",
             "-dCompressFonts=true",
             "-dSubsetFonts=true",
