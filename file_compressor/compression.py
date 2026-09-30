@@ -31,8 +31,20 @@ def _compress_above_bytes() -> int:
     return max(0, int(mb * 1024 * 1024))
 
 
+def compress_file_doc_event(doc, method=None):
+    """Fallback File DocType hook for upload paths that bypass after_file_upload."""
+    if getattr(doc.flags, "file_compressor_checked", False):
+        return doc
+    return compress_uploaded_file(doc)
+
+
 def compress_uploaded_file(doc):
     """Compress supported uploads before Frappe saves the File document."""
+    if getattr(doc.flags, "file_compressor_checked", False):
+        return doc
+
+    doc.flags.file_compressor_checked = True
+
     if not _enabled():
         return doc
 
