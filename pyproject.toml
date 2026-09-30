@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "file_compressor"
-version = "1.1.0"
+version = "1.2.0"
 description = "Automatic attachment compression for ERPNext/Frappe v16 on Frappe Cloud"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "Pillow>=10.0.0"
+    "Pillow>=10.0.0",
+    "PyMuPDF>=1.24.0"
 ]
 
 [tool.bench.frappe-dependencies]
