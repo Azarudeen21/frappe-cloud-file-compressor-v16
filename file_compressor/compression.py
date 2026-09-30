@@ -10,7 +10,6 @@ from pathlib import Path
 import frappe
 from PIL import Image, ImageOps
 
-
 SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 VALID_PDF_PRESETS = {"/screen", "/ebook", "/printer", "/prepress"}
 
@@ -33,13 +32,7 @@ def _compress_above_bytes() -> int:
 
 
 def compress_uploaded_file(doc):
-    """Compress supported uploads before Frappe saves the File document.
-
-    Important for Frappe v16:
-    handler.upload_file() passes the original upload size in frappe.form_dict.
-    File.validate() can later copy that value into File.file_size, so after
-    compression we must update both the document and form_dict metadata.
-    """
+    """Compress supported uploads before Frappe saves the File document."""
     if not _enabled():
         return doc
 
@@ -69,20 +62,13 @@ def compress_uploaded_file(doc):
         if compressed and len(compressed) < original_size:
             compressed_size = len(compressed)
 
-            # Replace the bytes Frappe will save.
             doc.content = compressed
             doc._content = compressed
-
-            # Keep File metadata correct.
             doc.file_size = compressed_size
 
-            # Frappe v16 File.validate() reads frappe.form_dict.file_size,
-            # which normally still contains the ORIGINAL browser upload size.
-            # Update it so the stored File record reflects the compressed file.
             if getattr(frappe, "form_dict", None) is not None:
                 frappe.form_dict.file_size = compressed_size
 
-            # Helpful request-local flags for debugging/support.
             doc.flags.file_compressor_applied = True
             doc.flags.file_compressor_original_size = original_size
             doc.flags.file_compressor_final_size = compressed_size
@@ -131,14 +117,25 @@ def _compress_image(content: bytes, extension: str) -> bytes:
 
 
 def _compress_pdf(content: bytes) -> bytes:
+    """Compress PDF using Ghostscript when available, otherwise PyMuPDF."""
     gs = shutil.which("gs")
-    if not gs:
-        frappe.log_error(
-            title="PDF Compression Skipped",
-            message="Ghostscript executable 'gs' was not found in the running container.",
-        )
-        return content
 
+    if gs:
+        try:
+            result = _compress_pdf_ghostscript(content, gs)
+            if result and len(result) < len(content):
+                return result
+        except Exception:
+            frappe.log_error(
+                title="Ghostscript PDF Compression Failed",
+                message=frappe.get_traceback(),
+            )
+
+    # Frappe Cloud fallback: no OS package required.
+    return _compress_pdf_pymupdf(content)
+
+
+def _compress_pdf_ghostscript(content: bytes, gs: str) -> bytes:
     preset = str(_cfg("attachment_pdf_quality", "/ebook"))
     if preset not in VALID_PDF_PRESETS:
         preset = "/ebook"
@@ -196,3 +193,73 @@ def _compress_pdf(content: bytes) -> bytes:
                     os.remove(path)
                 except OSError:
                     pass
+
+
+def _compress_pdf_pymupdf(content: bytes) -> bytes:
+    """Pure-Python Frappe Cloud fallback.
+
+    First performs structural PDF optimization. If that does not materially
+    reduce the file and aggressive mode is enabled, it rebuilds pages as
+    compressed JPEG page images at configurable DPI.
+    """
+    import fitz
+
+    # Pass 1: lossless / structural optimization.
+    source = fitz.open(stream=content, filetype="pdf")
+    try:
+        optimized = io.BytesIO()
+        source.save(
+            optimized,
+            garbage=4,
+            deflate=True,
+            deflate_images=True,
+            deflate_fonts=True,
+            clean=True,
+        )
+        optimized_bytes = optimized.getvalue()
+    finally:
+        source.close()
+
+    if optimized_bytes and len(optimized_bytes) < len(content) * 0.90:
+        return optimized_bytes
+
+    aggressive = int(_cfg("attachment_pdf_aggressive_fallback", 1)) == 1
+    if not aggressive:
+        return optimized_bytes if len(optimized_bytes) < len(content) else content
+
+    dpi = int(_cfg("attachment_pdf_raster_dpi", 140))
+    dpi = max(72, min(220, dpi))
+    jpeg_quality = int(_cfg("attachment_pdf_jpeg_quality", 68))
+    jpeg_quality = max(30, min(90, jpeg_quality))
+
+    source = fitz.open(stream=content, filetype="pdf")
+    output = fitz.open()
+
+    try:
+        matrix = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+
+        for page in source:
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            jpg = pix.tobytes("jpeg", jpg_quality=jpeg_quality)
+
+            rect = page.rect
+            new_page = output.new_page(width=rect.width, height=rect.height)
+            new_page.insert_image(rect, stream=jpg)
+
+        rebuilt = output.tobytes(
+            garbage=4,
+            deflate=True,
+            deflate_images=True,
+            clean=True,
+        )
+    finally:
+        output.close()
+        source.close()
+
+    candidates = [content]
+    if optimized_bytes:
+        candidates.append(optimized_bytes)
+    if rebuilt:
+        candidates.append(rebuilt)
+
+    return min(candidates, key=len)
