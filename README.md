@@ -66,3 +66,8 @@ Supported PDF presets:
 The app only keeps a compressed result when it is smaller than the original file. If compression fails, the original upload is preserved.
 
 Large original uploads still need to be allowed by your Frappe Cloud/site upload-size configuration before this hook can process them.
+
+
+## Frappe v16 file-size metadata fix
+
+Version 1.1.1 also updates `frappe.form_dict.file_size` after successful compression. Frappe v16 can otherwise overwrite the File record's `file_size` with the original browser-upload size during validation, even when the saved content has already been compressed.
