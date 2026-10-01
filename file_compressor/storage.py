@@ -25,7 +25,7 @@ def write_file(file_doc):
 
     content = getattr(file_doc, "_content", None)
     if not content:
-        return file_doc.save_file_on_filesystem()
+        frappe.throw("File Compressor: no file content was available at write stage.")
 
     if isinstance(content, str):
         content = content.encode()
